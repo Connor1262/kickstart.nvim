@@ -98,16 +98,6 @@ vim.g.have_nerd_font = false
 -- NOTE: You can change these options as you wish!
 --  For more options, you can see `:help option-list`
 
--- Auto change to directory
-vim.api.nvim_create_autocmd('BufEnter', {
-  callback = function()
-    local file = vim.api.nvim_buf_get_name(0)
-    if file ~= '' and vim.fn.filereadable(file) == 1 then
-      vim.cmd('silent! lcd ' .. vim.fn.fnameescape(vim.fn.fnamemodify(file, ':p:h')))
-    end
-  end,
-})
-
 -- Indentation
 vim.o.tabstop = 4
 vim.o.softtabstop = 4
