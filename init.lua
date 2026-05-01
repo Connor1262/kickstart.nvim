@@ -101,10 +101,37 @@ do
   -- Set to true if you have a Nerd Font installed and selected in the terminal
   vim.g.have_nerd_font = false
 
+  -- Auto change to directory of current file
+  vim.api.nvim_create_autocmd('BufEnter', {
+    callback = function()
+      local file = vim.api.nvim_buf_get_name(0)
+      if file ~= '' and vim.fn.filereadable(file) == 1 then
+        vim.cmd('silent! lcd ' .. vim.fn.fnameescape(vim.fn.fnamemodify(file, ':p:h')))
+      end
+    end,
+  })
+
   -- [[ Setting options ]]
   --  See `:help vim.o`
   -- NOTE: You can change these options as you wish!
   --  For more options, you can see `:help option-list`
+
+  -- Indentation: 4 spaces globally, 2 spaces for web/config filetypes
+  vim.o.tabstop = 4
+  vim.o.softtabstop = 4
+  vim.o.shiftwidth = 4
+  vim.o.expandtab = true
+  vim.o.smartindent = true
+  vim.o.autoindent = true
+
+  vim.api.nvim_create_autocmd('FileType', {
+    pattern = { 'lua', 'javascript', 'typescript', 'html', 'css', 'yaml', 'json' },
+    callback = function()
+      vim.bo.tabstop = 2
+      vim.bo.softtabstop = 2
+      vim.bo.shiftwidth = 2
+    end,
+  })
 
   -- Make line numbers default
   vim.o.number = true
@@ -976,7 +1003,7 @@ do
   -- NOTE: You can add your own plugins, configuration, etc from `lua/custom/plugins/*.lua`
   --
   --  Uncomment the following line and add your plugins to `lua/custom/plugins/*.lua` to get going.
-  -- require 'custom.plugins'
+  require 'custom.plugins'
 end
 
 -- The line beneath this is called `modeline`. See `:help modeline`
