@@ -12,6 +12,8 @@ require('neo-tree').setup {
     window = {
       mappings = {
         ['\\'] = 'close_window',
+        ['C'] = 'set_root',
+        ['u'] = 'navigate_up',
       },
     },
   },

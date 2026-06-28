@@ -35,7 +35,18 @@ dap.adapters.codelldb = {
 
 dap.configurations.cpp = {
   {
-    name = 'Launch file',
+    name = 'Launch (integrated terminal)',
+    type = 'codelldb',
+    request = 'launch',
+    program = function()
+      return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/build/', 'file')
+    end,
+    cwd = '${workspaceFolder}',
+    stopOnEntry = false,
+    terminal = 'integrated',
+  },
+  {
+    name = 'Launch (no terminal / no stdin)',
     type = 'codelldb',
     request = 'launch',
     program = function()

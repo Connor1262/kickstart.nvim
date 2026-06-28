@@ -84,6 +84,24 @@ I hope you enjoy your Neovim journey,
 P.S. You can delete this when you're done too. It's your config now! :)
 --]]
 
+-- Project-root markers, nearest-ancestor wins. cmake markers first so C/C++
+-- projects anchor at the CMake root rather than a parent .git repo.
+local ROOT_MARKERS = { 'CMakeLists.txt', 'compile_commands.json', '.git', 'Makefile' }
+
+-- cd (global) to the project root for the given buffer, falling back to the
+-- file's own directory. Uses vim.fs.root (built-in, handles odd paths like C++)
+-- and vim.fn.chdir, which fires DirChanged with correct data so cmake-tools,
+-- neo-tree, telescope, etc. all stay in sync. Defined here (chunk scope) so it
+-- is visible to every `do` block below.
+local function cd_to_project_root(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local file = vim.api.nvim_buf_get_name(buf)
+  if file == '' or vim.fn.filereadable(file) ~= 1 then return end
+  local root = vim.fs.root(buf, ROOT_MARKERS) or vim.fn.fnamemodify(file, ':p:h')
+  if root ~= vim.fn.getcwd() then vim.fn.chdir(root) end
+  return root
+end
+
 -- ============================================================
 -- SECTION 1: OPTIONS
 -- Core Neovim settings, leaders, options, basic keymaps, basic autocmds
@@ -101,14 +119,24 @@ do
   -- Set to true if you have a Nerd Font installed and selected in the terminal
   vim.g.have_nerd_font = false
 
-  -- Auto change to directory of current file
+  -- GLSL shader file type detection
+  vim.filetype.add {
+    extension = {
+      vert = 'glsl',
+      frag = 'glsl',
+      geom = 'glsl',
+      comp = 'glsl',
+      tesc = 'glsl',
+      tese = 'glsl',
+      glsl = 'glsl',
+    },
+  }
+
+  -- Auto-cd to the project root whenever entering a real file buffer.
+  -- One autocmd for everything (no FileType/BufEnter races); keeps cwd at the
+  -- project root so cmake-tools, telescope and neo-tree all behave.
   vim.api.nvim_create_autocmd('BufEnter', {
-    callback = function()
-      local file = vim.api.nvim_buf_get_name(0)
-      if file ~= '' and vim.fn.filereadable(file) == 1 then
-        vim.cmd('silent! lcd ' .. vim.fn.fnameescape(vim.fn.fnamemodify(file, ':p:h')))
-      end
-    end,
+    callback = function(args) cd_to_project_root(args.buf) end,
   })
 
   -- [[ Setting options ]]
@@ -137,7 +165,7 @@ do
   vim.o.number = true
   -- You can also add relative line numbers, to help with jumping.
   --  Experiment for yourself to see if you like it!
-  -- vim.o.relativenumber = true
+  vim.o.relativenumber = true
 
   -- Enable mouse mode, can be useful for resizing splits for example!
   vim.o.mouse = 'a'
@@ -237,6 +265,78 @@ do
   }
 
   vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostic [Q]uickfix list' })
+
+  vim.keymap.set('n', '<leader>ch', function()
+    vim.lsp.buf_request(0, 'textDocument/switchSourceHeader', { uri = vim.uri_from_bufnr(0) }, function(err, result)
+      if not err and result then vim.cmd('edit ' .. vim.uri_to_fname(result)) end
+    end)
+  end, { desc = '[C]langd Switch [H]eader' })
+
+  vim.keymap.set('n', '<leader>cX', function()
+    local build_dir = vim.fn.getcwd() .. '/build'
+    local out_dir = vim.fn.getcwd() .. '/out'
+    local target = vim.fn.isdirectory(build_dir) == 1 and build_dir or vim.fn.isdirectory(out_dir) == 1 and out_dir or nil
+    if not target then
+      vim.notify('No build/out directory found', vim.log.levels.WARN)
+      return
+    end
+    vim.ui.select({ 'Yes', 'No' }, { prompt = 'Delete ' .. target .. '?' }, function(choice)
+      if choice == 'Yes' then
+        vim.fn.delete(target, 'rf')
+        vim.notify('Deleted ' .. target)
+      end
+    end)
+  end, { desc = 'Delete build directory' })
+
+  local function reload_lsp()
+    for _, client in ipairs(vim.lsp.get_clients({ bufnr = 0 })) do
+      client:stop()
+    end
+    vim.defer_fn(function() vim.cmd('edit') end, 500)
+  end
+
+  vim.keymap.set('n', '<leader>cP', function()
+    local path = vim.fn.expand('%:p:h')
+    local candidates = {}
+    local search = path
+
+    while search ~= '/' do
+      local has_git   = vim.fn.isdirectory(search .. '/.git') == 1
+      local has_cmake = vim.fn.filereadable(search .. '/CMakeLists.txt') == 1
+      if has_git or has_cmake then
+        local label = search:gsub(vim.fn.expand('~'), '~')
+        local tag = has_git and '[git]' or '[cmake]'
+        table.insert(candidates, { path = search, label = label .. ' ' .. tag })
+      end
+      search = vim.fn.fnamemodify(search, ':h')
+    end
+
+    if #candidates == 0 then
+      vim.notify('No project root found', vim.log.levels.WARN)
+    elseif #candidates == 1 then
+      vim.cmd('cd ' .. vim.fn.fnameescape(candidates[1].path))
+      vim.notify('cd → ' .. candidates[1].label)
+      reload_lsp()
+    else
+      local labels = vim.tbl_map(function(c) return c.label end, candidates)
+      vim.ui.select(labels, { prompt = 'Select project root:' }, function(choice)
+        if not choice then return end
+        for _, c in ipairs(candidates) do
+          if c.label == choice then
+            vim.cmd('cd ' .. vim.fn.fnameescape(c.path))
+            vim.notify('cd → ' .. c.label)
+            reload_lsp()
+            return
+          end
+        end
+      end)
+    end
+  end, { desc = '[C]hange to [P]roject root (picker)' })
+
+  vim.keymap.set('n', '<leader>lr', function()
+    reload_lsp()
+    vim.notify('LSP reloaded')
+  end, { desc = '[L]SP [R]eload' })
 
   -- Exit terminal mode in the builtin terminal with a shortcut that is a bit easier
   -- for people to discover. Otherwise, you normally need to press <C-\><C-n>, which
@@ -398,7 +498,7 @@ do
     spec = {
       { '<leader>s', group = '[S]earch', mode = { 'n', 'v' } },
       { '<leader>t', group = '[T]oggle' },
-      { '<leader>h', group = 'Git [H]unk', mode = { 'n', 'v' } }, -- Enable gitsigns recommended keymaps first
+      { '<leader>h', group = '[H]arpoon', mode = { 'n', 'v' } },
       { 'gr', group = 'LSP Actions', mode = { 'n' } },
     },
   }
@@ -409,18 +509,10 @@ do
   -- change the command under that to load whatever the name of that colorscheme is.
   --
   -- If you want to see what colorschemes are already installed, you can use `:Telescope colorscheme`.
-  vim.pack.add { gh 'folke/tokyonight.nvim' }
-  ---@diagnostic disable-next-line: missing-fields
-  require('tokyonight').setup {
-    styles = {
-      comments = { italic = false }, -- Disable italics in comments
-    },
-  }
-
-  -- Load the colorscheme here.
-  -- Like many other themes, this one has different styles, and you could load
-  -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
-  vim.cmd.colorscheme 'tokyonight-night'
+  vim.pack.add { gh 'ellisonleao/gruvbox.nvim' }
+  require('gruvbox').setup()
+  vim.o.background = 'dark' -- or 'light' for light mode
+  vim.cmd.colorscheme 'gruvbox'
 
   -- Highlight todo, notes, etc in comments
   vim.pack.add { gh 'folke/todo-comments.nvim' }
@@ -457,7 +549,17 @@ do
   -- - saiw) - [S]urround [A]dd [I]nner [W]ord [)]Paren
   -- - sd'   - [S]urround [D]elete [']quotes
   -- - sr)'  - [S]urround [R]eplace [)] [']
-  require('mini.surround').setup()
+  require('mini.surround').setup {
+    mappings = {
+      add            = 'gza',
+      delete         = 'gzd',
+      find           = 'gzf',
+      find_left      = 'gzF',
+      highlight      = 'gzh',
+      replace        = 'gzr',
+      update_n_lines = 'gzn',
+    },
+  }
 
   -- Simple and easy statusline.
   --  You could remove this setup call if you don't like it,
@@ -719,7 +821,8 @@ do
   --  See `:help lsp-config` for information about keys and how to configure
   ---@type table<string, vim.lsp.Config>
   local servers = {
-    -- clangd = {},
+    clangd = {},
+    glsl_analyzer = {},
     -- gopls = {},
     -- pyright = {},
     -- rust_analyzer = {},
@@ -729,8 +832,6 @@ do
     --
     -- But for many setups, the LSP (`ts_ls`) will work just fine
     -- ts_ls = {},
-
-    stylua = {}, -- Used to format Lua code
 
     -- Special Lua Config, as recommended by neovim help docs
     lua_ls = {
@@ -786,7 +887,7 @@ do
   -- You can press `g?` for help in this menu.
   local ensure_installed = vim.tbl_keys(servers or {})
   vim.list_extend(ensure_installed, {
-    -- You can add other tools here that you want Mason to install
+    'stylua', -- Lua formatter (used by conform, not an LSP — don't put in `servers`)
   })
 
   require('mason-tool-installer').setup { ensure_installed = ensure_installed }
@@ -931,7 +1032,7 @@ do
   vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
 
   -- Ensure basic parsers are installed
-  local parsers = { 'bash', 'c', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc' }
+  local parsers = { 'bash', 'c', 'cpp', 'glsl', 'cmake', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'json', 'yaml', 'rust', 'java', 'python', 'javascript', 'typescript', 'c_sharp' }
   require('nvim-treesitter').install(parsers)
 
   ---@param buf integer
