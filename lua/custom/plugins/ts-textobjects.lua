@@ -44,5 +44,8 @@ mv('[[', move.goto_previous_start, '@class.outer', 'Prev class start')
 mv('[]', move.goto_previous_end, '@class.outer', 'Prev class end')
 
 -- [[ Swap ]] parameters left/right
-vim.keymap.set('n', '<leader>a', function() swap.swap_next('@parameter.inner') end, { desc = 'Swap parameter with next' })
-vim.keymap.set('n', '<leader>A', function() swap.swap_previous('@parameter.inner') end, { desc = 'Swap parameter with previous' })
+-- Keyed off `,` to match the `a,`/`i,` parameter textobjects above. NOT `<leader>a`:
+-- that is the Arduino/aerial prefix, and a bare `<leader>a` would make every
+-- `<leader>a*` map wait out `timeoutlen` before firing.
+vim.keymap.set('n', '<leader>,', function() swap.swap_next('@parameter.inner') end, { desc = 'Swap parameter with next' })
+vim.keymap.set('n', '<leader><', function() swap.swap_previous('@parameter.inner') end, { desc = 'Swap parameter with previous' })

@@ -129,6 +129,8 @@ do
       tesc = 'glsl',
       tese = 'glsl',
       glsl = 'glsl',
+      vs = 'glsl',
+      fs = 'glsl',
     },
   }
 
@@ -364,6 +366,12 @@ do
   -- Close the current window (without quitting Neovim if it's the last one)
   vim.keymap.set('n', '<leader>w', '<C-w>c', { desc = 'Close [W]indow' })
 
+  -- Shift+arrow jumps a few lines at a time. Overrides Neovim's default
+  -- page-up/page-down on these keys. Tweak the distance here.
+  local jump = 5
+  vim.keymap.set({ 'n', 'v' }, '<S-Up>', jump .. 'gk', { desc = 'Jump up ' .. jump .. ' lines' })
+  vim.keymap.set({ 'n', 'v' }, '<S-Down>', jump .. 'gj', { desc = 'Jump down ' .. jump .. ' lines' })
+
   -- NOTE: Some terminals have colliding keymaps or are not able to send distinct keycodes
   -- vim.keymap.set("n", "<C-S-h>", "<C-w>H", { desc = "Move window to the left" })
   -- vim.keymap.set("n", "<C-S-l>", "<C-w>L", { desc = "Move window to the right" })
@@ -380,6 +388,45 @@ do
     desc = 'Highlight when yanking (copying) text',
     group = vim.api.nvim_create_augroup('kickstart-highlight-yank', { clear = true }),
     callback = function() vim.hl.on_yank() end,
+  })
+
+  -- Terminal buffers need different settings than file buffers. Line numbers and
+  -- the sign column shift the shell's own columns, and a non-zero 'scrolloff'
+  -- fights the terminal's scrolling (the cursor can never reach the last 10
+  -- lines, so output jitters as it arrives).
+  local term_group = vim.api.nvim_create_augroup('custom-terminal', { clear = true })
+
+  -- Enter terminal mode, but only while the job is actually alive. Once a program
+  -- exits, the buffer stays around (toggleterm's close_on_exit = false) and
+  -- startinsert on a dead terminal is an error. jobwait with a 0 timeout returns
+  -- -1 for a job that is still running.
+  local function enter_terminal_mode()
+    if vim.bo.buftype ~= 'terminal' then return end
+    local job = vim.b.terminal_job_id
+    if job and vim.fn.jobwait({ job }, 0)[1] == -1 then vim.cmd 'startinsert' end
+  end
+
+  vim.api.nvim_create_autocmd('TermOpen', {
+    desc = 'Terminal-local settings, and start in terminal mode',
+    group = term_group,
+    callback = function()
+      vim.opt_local.number = false
+      vim.opt_local.relativenumber = false
+      vim.opt_local.signcolumn = 'no'
+      vim.opt_local.scrolloff = 0
+      vim.opt_local.cursorline = false
+      enter_terminal_mode()
+    end,
+  })
+
+  -- Re-entering an already-open terminal (clicking into it, or a <C-hjkl> hop)
+  -- leaves you in normal mode, where typed keys are read as editor commands
+  -- instead of reaching the shell. Drop straight back into terminal mode.
+  vim.api.nvim_create_autocmd({ 'BufEnter', 'WinEnter' }, {
+    desc = 'Return to terminal mode when focusing a terminal',
+    group = term_group,
+    pattern = 'term://*',
+    callback = enter_terminal_mode,
   })
 end
 
@@ -499,6 +546,7 @@ do
     icons = { mappings = vim.g.have_nerd_font },
     -- Document existing key chains
     spec = {
+      { '<leader>a', group = '[A]rduino / [A]erial' },
       { '<leader>s', group = '[S]earch', mode = { 'n', 'v' } },
       { '<leader>t', group = '[T]oggle' },
       { '<leader>h', group = '[H]arpoon', mode = { 'n', 'v' } },
@@ -824,8 +872,52 @@ do
   --  See `:help lsp-config` for information about keys and how to configure
   ---@type table<string, vim.lsp.Config>
   local servers = {
-    clangd = {},
+    clangd = {
+      cmd = {
+        'clangd',
+        -- Builds the project-wide index that header insertion reads from. Without
+        -- an index clangd only knows symbols from headers already included.
+        '--background-index',
+        -- Attach an "#include <foo>" edit to completions for symbols whose header
+        -- isn't included yet. `iwyu` is the default; stated here so it's visible.
+        '--header-insertion=iwyu',
+        -- Marks such completions with a leading dot so you can see which ones
+        -- will add an include before you accept them.
+        '--header-insertion-decorators',
+        -- Offer symbols from namespaces that aren't in scope, so bare `vector`
+        -- can complete to `std::vector` (and bring its header along).
+        '--all-scopes-completion',
+        '--completion-style=detailed',
+        -- Runs clang-tidy checks in-process (no separate clang-tidy binary
+        -- needed) so its fix-its show up as code actions on `gra`. Which checks
+        -- run is controlled by a `.clang-tidy` file in the project or above it.
+        '--clang-tidy',
+      },
+    },
     glsl_analyzer = {},
+    -- CMake completions/hover/lint (neocmakelsp)
+    neocmake = {},
+    -- Arduino (.ino). Wraps clangd + arduino-cli. Default board is Uno; override
+    -- per-sketch with a `sketch.yaml` (`default_fqbn: ...`) or change `-fqbn` below.
+    arduino_language_server = {
+      cmd = {
+        'arduino-language-server',
+        '-cli-config', vim.fn.expand '~/Library/Arduino15/arduino-cli.yaml',
+        '-fqbn', 'arduino:avr:uno',
+        '-cli', '/opt/homebrew/bin/arduino-cli',
+        '-clangd', 'clangd',
+      },
+      -- Always hand the server a non-nil root. Its default root_dir returns nil
+      -- when no `*.ino` exists on disk yet (new/unsaved sketch), and the server
+      -- (0.7.7) segfaults on a null rootUri. Fall back to the file's own dir.
+      root_dir = function(bufnr, on_dir)
+        local fname = vim.api.nvim_buf_get_name(bufnr)
+        local dir = vim.fs.root(fname ~= '' and fname or vim.uv.cwd(), function(name) return name:match '%.ino$' ~= nil end)
+          or (fname ~= '' and vim.fs.dirname(fname))
+          or vim.uv.cwd()
+        on_dir(dir)
+      end,
+    },
     -- gopls = {},
     -- pyright = {},
     -- rust_analyzer = {},
@@ -949,7 +1041,13 @@ do
   -- NOTE: You can also specify plugin using a version range for its git tag.
   --  See `:help vim.version.range()` for more info
   vim.pack.add { { src = gh 'L3MON4D3/LuaSnip', version = vim.version.range '2.*' } }
-  require('luasnip').setup {}
+  require('luasnip').setup {
+    -- Drop the snippet session once the cursor leaves the snippet's region,
+    -- so a half-finished LSP snippet from 20 lines ago can't be jumped back
+    -- into by accident.
+    region_check_events = 'InsertEnter,CursorMoved',
+    delete_check_events = 'TextChanged,InsertLeave',
+  }
 
   -- `friendly-snippets` contains a variety of premade snippets.
   --    See the README about individual language/framework/plugin snippets:
@@ -976,7 +1074,6 @@ do
       -- No, but seriously. Please read `:help ins-completion`, it is really good!
       --
       -- All presets have the following mappings:
-      -- <tab>/<s-tab>: move to right/left of your snippet expansion
       -- <c-space>: Open menu or open docs if already open
       -- <c-n>/<c-p> or <up>/<down>: Select next/previous item
       -- <c-e>: Hide menu
@@ -984,6 +1081,17 @@ do
       --
       -- See `:help blink-cmp-config-keymap` for defining your own keymap
       preset = 'default',
+
+      -- <tab> is plain indentation, always. Every preset otherwise binds it to
+      -- snippet_forward, which teleports the cursor to a leftover tabstop.
+      -- 'fallback' hands the key back to Neovim instead of blink consuming it.
+      ['<Tab>'] = { 'fallback' },
+      ['<S-Tab>'] = { 'fallback' },
+
+      -- Snippet placeholder navigation lives here instead (the pair LuaSnip's
+      -- own docs use).
+      ['<C-l>'] = { 'snippet_forward', 'fallback' },
+      ['<C-j>'] = { 'snippet_backward', 'fallback' },
 
       -- For more advanced Luasnip keymaps (e.g. selecting choice nodes, expansion) see:
       --    https://github.com/L3MON4D3/LuaSnip?tab=readme-ov-file#keymaps
@@ -1035,7 +1143,7 @@ do
   vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
 
   -- Ensure basic parsers are installed
-  local parsers = { 'bash', 'c', 'cpp', 'glsl', 'cmake', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'json', 'yaml', 'rust', 'java', 'python', 'javascript', 'typescript', 'c_sharp' }
+  local parsers = { 'bash', 'c', 'cpp', 'glsl', 'cmake', 'make', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'json', 'yaml', 'rust', 'java', 'python', 'javascript', 'typescript', 'c_sharp' }
   require('nvim-treesitter').install(parsers)
 
   ---@param buf integer

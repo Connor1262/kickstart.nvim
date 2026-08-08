@@ -33,14 +33,30 @@ dap.adapters.codelldb = {
   },
 }
 
+-- Default the prompt to the cmake-tools launch target when one is selected,
+-- otherwise fall back to the build dir (still needs the binary name appended).
+local function pick_executable()
+  local ok, cmake = pcall(require, 'cmake-tools')
+  local default = vim.fn.getcwd() .. '/build/'
+  if ok then
+    local target_path = cmake.get_launch_target_path()
+    if target_path and vim.fn.executable(target_path) == 1 then
+      default = target_path
+    end
+  end
+  local path = vim.fn.input('Path to executable: ', default, 'file')
+  if vim.fn.isdirectory(path) == 1 then
+    error(('"%s" is a directory, not an executable — append the binary name'):format(path), 0)
+  end
+  return path
+end
+
 dap.configurations.cpp = {
   {
     name = 'Launch (integrated terminal)',
     type = 'codelldb',
     request = 'launch',
-    program = function()
-      return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/build/', 'file')
-    end,
+    program = pick_executable,
     cwd = '${workspaceFolder}',
     stopOnEntry = false,
     terminal = 'integrated',
@@ -49,9 +65,7 @@ dap.configurations.cpp = {
     name = 'Launch (no terminal / no stdin)',
     type = 'codelldb',
     request = 'launch',
-    program = function()
-      return vim.fn.input('Path to executable: ', vim.fn.getcwd() .. '/build/', 'file')
-    end,
+    program = pick_executable,
     cwd = '${workspaceFolder}',
     stopOnEntry = false,
   },

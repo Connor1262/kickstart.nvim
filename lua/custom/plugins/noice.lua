@@ -39,3 +39,6 @@ require('noice').setup {
 }
 
 vim.keymap.set('n', '<leader>nd', '<cmd>NoiceDismiss<CR>', { desc = '[N]oice [D]ismiss notifications' })
+vim.keymap.set('n', '<leader>nh', '<cmd>Noice history<CR>', { desc = '[N]oice message [H]istory' })
+vim.keymap.set('n', '<leader>nl', '<cmd>Noice last<CR>',    { desc = '[N]oice [L]ast message' })
+vim.keymap.set('n', '<leader>ne', '<cmd>Noice errors<CR>',  { desc = '[N]oice [E]rrors only' })
