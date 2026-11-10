@@ -187,9 +187,21 @@ do
   -- Enable undo/redo changes even after closing and reopening a file
   vim.o.undofile = true
 
+  -- No swap files: auto-save.nvim (lua/custom/plugins/autosave.lua) writes
+  -- buffers to disk, and undofile keeps history, so a crash loses little.
+  vim.o.swapfile = false
+
   -- Case-insensitive searching UNLESS \C or one or more capital letters in the search term
   vim.o.ignorecase = true
   vim.o.smartcase = true
+
+  -- Use ripgrep for `:grep` instead of the system grep. Respects .gitignore,
+  -- and is dramatically faster than the built-in `:vimgrep` on large projects.
+  --  See `:help 'grepprg'`
+  if vim.fn.executable 'rg' == 1 then
+    vim.o.grepprg = 'rg --vimgrep --smart-case --hidden --glob=!.git/'
+    vim.o.grepformat = '%f:%l:%c:%m'
+  end
 
   -- Keep signcolumn on by default
   vim.o.signcolumn = 'yes'
@@ -223,6 +235,12 @@ do
 
   -- Minimal number of screen lines to keep above and below the cursor.
   vim.o.scrolloff = 10
+
+  -- Default border for every floating window: LSP hover, signature help,
+  -- rename prompts, and any plugin float that does not pass its own `border`.
+  -- Diagnostics already set 'rounded' explicitly further down; this makes that
+  -- the default rather than the exception.
+  vim.o.winborder = 'rounded'
 
   -- if performing an operation that would fail due to unsaved changes in the buffer (like `:q`),
   -- instead raise a dialog asking if you wish to save the current file(s)
@@ -267,6 +285,40 @@ do
   }
 
   vim.keymap.set('n', '<leader>q', vim.diagnostic.setloclist, { desc = 'Open diagnostic [Q]uickfix list' })
+
+  -- Open Codex in a terminal tab rooted at the nearest Git repository. This is
+  -- intentionally project-agnostic: outside Git it uses Neovim's current cwd.
+  -- `:Codex optional prompt` starts the session with an initial prompt.
+  local function open_codex(prompt)
+    local root = vim.fs.root(0, { '.git' }) or vim.fn.getcwd()
+    local codex = vim.fn.exepath('codex')
+    local bundled_codex = '/Applications/ChatGPT.app/Contents/Resources/codex'
+
+    if codex == '' and vim.fn.executable(bundled_codex) == 1 then codex = bundled_codex end
+    if codex == '' then
+      vim.notify('Codex executable not found in PATH or the ChatGPT app', vim.log.levels.ERROR)
+      return
+    end
+
+    local command = { codex }
+    if prompt and prompt ~= '' then table.insert(command, prompt) end
+
+    vim.cmd 'tabnew'
+    local job = vim.fn.jobstart(command, { term = true, cwd = root })
+    if job <= 0 then
+      vim.cmd 'tabclose'
+      vim.notify('Failed to start Codex', vim.log.levels.ERROR)
+      return
+    end
+
+    vim.cmd 'startinsert'
+  end
+
+  vim.api.nvim_create_user_command('Codex', function(opts) open_codex(opts.args) end, {
+    nargs = '*',
+    desc = 'Open Codex in a terminal tab at the current project root',
+  })
+  vim.keymap.set('n', '<leader>oc', open_codex, { desc = '[O]pen [C]odex' })
 
   vim.keymap.set('n', '<leader>ch', function()
     vim.lsp.buf_request(0, 'textDocument/switchSourceHeader', { uri = vim.uri_from_bufnr(0) }, function(err, result)
@@ -365,6 +417,16 @@ do
 
   -- Close the current window (without quitting Neovim if it's the last one)
   vim.keymap.set('n', '<leader>w', '<C-w>c', { desc = 'Close [W]indow' })
+
+  -- Ctrl+S saves the current file from normal, insert and visual mode.
+  -- <Cmd> (rather than :) means insert mode isn't left to do it.
+  vim.keymap.set({ 'n', 'i', 'x' }, '<C-s>', '<Cmd>write<CR>', { desc = 'Save file' })
+
+  -- Tab/Shift-Tab indent the selection, reselecting it afterwards so the keys
+  -- can be held down. 'x' (visual) rather than 'v' (visual + select) so this
+  -- doesn't fire inside LuaSnip placeholders, which live in select mode.
+  vim.keymap.set('x', '<Tab>', '>gv', { desc = 'Indent selection' })
+  vim.keymap.set('x', '<S-Tab>', '<gv', { desc = 'Dedent selection' })
 
   -- Shift+arrow jumps a few lines at a time. Overrides Neovim's default
   -- page-up/page-down on these keys. Tweak the distance here.
@@ -562,8 +624,76 @@ do
   -- If you want to see what colorschemes are already installed, you can use `:Telescope colorscheme`.
   vim.pack.add { gh 'ellisonleao/gruvbox.nvim' }
   require('gruvbox').setup()
-  vim.o.background = 'dark' -- or 'light' for light mode
+
+  -- 'background' is deliberately not set here. Neovim queries the terminal with
+  -- OSC 11 at startup, derives light/dark from the reply's luminance, and does
+  -- it before user config runs -- so hardcoding it here would only overwrite a
+  -- correct answer. Ghostty is configured to follow the macOS appearance
+  -- (theme = dark:...,light:... ), so this keeps the two in step at launch.
+  -- Live switching afterwards is handled by the block below.
   vim.cmd.colorscheme 'gruvbox'
+
+  -- [[ Ghostty light/dark handoff ]]
+  -- Neovim's OSC 11 detection above only runs at startup, so without this nvim
+  -- keeps whatever it detected at launch while the terminal around it changes.
+  --
+  -- Ghostty does implement DEC mode 2031 and reports changes as
+  -- CSI ? 997 ; 1 n / CSI ? 997 ; 2 n, but that is a DSR-style CSI reply and
+  -- TermResponse only fires for DA1, OSC, DCS and APC (:h TermResponse).
+  -- Verified against a real pty: the 997 report raises no event at all, so
+  -- mode 2031 is unusable from Lua. It is deliberately not enabled here.
+  --
+  -- What does work is re-asking. OSC 11 replies do raise TermResponse, and
+  -- Ghostty answers with its current background, so re-querying is enough to
+  -- notice a theme change. Setting 'background' reloads the colorscheme on its
+  -- own (:h 'background'), so gruvbox re-applies with no extra work.
+  local ghostty_group = vim.api.nvim_create_augroup('ghostty-colorscheme', { clear = true })
+
+  -- Writing the query costs a handful of bytes down the tty -- no subprocess,
+  -- unlike polling `defaults read -g AppleInterfaceStyle`.
+  local function query_background() pcall(vim.api.nvim_ui_send, '\27]11;?\7') end
+
+  -- Neovim has its own OSC 11 handler and would usually catch this, but it
+  -- deletes itself if 'background' was ever set explicitly. Parsing it here too
+  -- keeps this working regardless; the guard below makes the duplicate a no-op.
+  vim.api.nvim_create_autocmd('TermResponse', {
+    group = ghostty_group,
+    nested = true,
+    desc = 'Follow the terminal background colour (OSC 11)',
+    callback = function(ev)
+      local seq = ev.data.sequence or ''
+      local r, g, b = seq:match '^\27%]11;rgba?:(%x+)/(%x+)/(%x+)'
+      if not r then return end
+      -- Components are 1-4 hex digits; scale each by its own width.
+      local function chan(c) return tonumber(c, 16) / (16 ^ #c - 1) end
+      local luminance = 0.299 * chan(r) + 0.587 * chan(g) + 0.114 * chan(b)
+      local want = luminance < 0.5 and 'dark' or 'light'
+      -- Guard: re-setting 'background' reloads the colorscheme, so only touch
+      -- it on a real change or every query would cause a redraw.
+      if vim.o.background ~= want then vim.o.background = want end
+    end,
+  })
+
+  if vim.env.TERM_PROGRAM == 'ghostty' then
+    -- Catches the common case: flip the appearance elsewhere, return to nvim.
+    vim.api.nvim_create_autocmd('FocusGained', {
+      group = ghostty_group,
+      desc = 'Re-check the terminal background on focus',
+      callback = query_background,
+    })
+
+    -- Backstop for a change that happens while nvim is focused, e.g. macOS
+    -- switching to dark on schedule while you are typing.
+    local timer = vim.uv.new_timer()
+    if timer then
+      timer:start(5000, 5000, vim.schedule_wrap(query_background))
+      vim.api.nvim_create_autocmd('VimLeavePre', {
+        group = ghostty_group,
+        desc = 'Stop the background poll',
+        callback = function() pcall(timer.close, timer) end,
+      })
+    end
+  end
 
   -- Highlight todo, notes, etc in comments
   vim.pack.add { gh 'folke/todo-comments.nvim' }
@@ -762,6 +892,28 @@ do
 
   -- Shortcut for searching your Neovim configuration files
   vim.keymap.set('n', '<leader>sn', function() builtin.find_files { cwd = vim.fn.stdpath 'config', follow = true } end, { desc = '[S]earch [N]eovim files' })
+
+  -- Ripgrep the project straight into the quickfix list (see `grepprg` above).
+  -- Unlike `<leader>sg`, results persist in a list you can iterate with
+  -- `:cnext`/`:cprev` and edit en masse with `:cdo`. nvim-bqf previews them.
+  local function grep_to_quickfix(pattern)
+    if pattern == nil or pattern == '' then return end
+    vim.cmd { cmd = 'grep', args = { vim.fn.escape(pattern, ' |') }, bang = true }
+    if vim.fn.getqflist({ size = 0 }).size == 0 then
+      vim.notify('No matches for: ' .. pattern, vim.log.levels.WARN)
+    else
+      vim.cmd.copen()
+    end
+  end
+
+  vim.keymap.set('n', '<leader>sG', function()
+    vim.ui.input({ prompt = 'Grep project: ' }, grep_to_quickfix)
+  end, { desc = '[S]earch by [G]rep into quickfix' })
+
+  vim.keymap.set('v', '<leader>sG', function()
+    vim.cmd 'normal! "vy'
+    grep_to_quickfix(vim.fn.getreg 'v')
+  end, { desc = '[S]earch selection by [G]rep into quickfix' })
 end
 
 -- ============================================================
@@ -897,6 +1049,9 @@ do
     glsl_analyzer = {},
     -- CMake completions/hover/lint (neocmakelsp)
     neocmake = {},
+    -- C# (Godot .NET projects). Microsoft's Roslyn server; needs the .NET SDK and
+    -- a .sln/.csproj at the project root (Godot generates both on first C# build).
+    roslyn_ls = {},
     -- Arduino (.ino). Wraps clangd + arduino-cli. Default board is Uno; override
     -- per-sketch with a `sketch.yaml` (`default_fqbn: ...`) or change `-fqbn` below.
     arduino_language_server = {
@@ -918,6 +1073,7 @@ do
         on_dir(dir)
       end,
     },
+    r_language_server = {},
     -- gopls = {},
     -- pyright = {},
     -- rust_analyzer = {},
@@ -991,6 +1147,29 @@ do
     vim.lsp.config(name, server)
     vim.lsp.enable(name)
   end
+
+  -- Swift (sourcekit-lsp). Deliberately kept out of `servers` above: that table
+  -- feeds mason-tool-installer, and sourcekit-lsp is not in Mason's registry --
+  -- it ships inside the Swift toolchain itself. nvim-lspconfig's `lsp/sourcekit.lua`
+  -- already provides root_dir (buildServer.json / *.xcodeproj / Package.swift / .git)
+  -- and the dynamic-registration capabilities the server needs, so only the two
+  -- values below are overridden.
+  vim.lsp.config('sourcekit', {
+    -- A bare `sourcekit-lsp` on PATH resolves to swiftly's (6.3.2). `xcrun` picks
+    -- the one from the selected Xcode (6.3.3), which matches the SDK and module
+    -- format an Xcode/xcodebuild build produces. A mismatch there shows up as
+    -- bogus "cannot find X in scope" errors on stdlib and framework symbols.
+    cmd = { 'xcrun', 'sourcekit-lsp' },
+    -- Upstream also claims c/cpp/objc/objcpp, which would attach a second server
+    -- alongside the tuned clangd config above on those buffers. Swift only.
+    filetypes = { 'swift' },
+  })
+  vim.lsp.enable 'sourcekit'
+
+  -- GDScript. Not a Mason package: the server lives inside the Godot editor and
+  -- nvim-lspconfig's `lsp/gdscript.lua` connects to it over TCP (127.0.0.1:6005).
+  -- Godot must be open on the project for completions to work.
+  vim.lsp.enable 'gdscript'
 end
 
 -- ============================================================
@@ -1082,14 +1261,18 @@ do
       -- See `:help blink-cmp-config-keymap` for defining your own keymap
       preset = 'default',
 
-      -- <tab> is plain indentation, always. Every preset otherwise binds it to
-      -- snippet_forward, which teleports the cursor to a leftover tabstop.
-      -- 'fallback' hands the key back to Neovim instead of blink consuming it.
-      ['<Tab>'] = { 'fallback' },
-      ['<S-Tab>'] = { 'fallback' },
+      -- <tab> accepts the completion when the menu is open, jumps to the next
+      -- snippet placeholder when one is pending, and is plain indentation
+      -- otherwise. Order matters — accept has to win while the menu is up.
+      --
+      -- snippet_forward used to be omitted here because it teleported the
+      -- cursor to leftover tabstops from snippets accepted lines ago; the
+      -- LuaSnip `region_check_events` setting above now ends those sessions
+      -- as soon as the cursor leaves the snippet, so Tab is safe again.
+      ['<Tab>'] = { 'select_and_accept', 'snippet_forward', 'fallback' },
+      ['<S-Tab>'] = { 'snippet_backward', 'fallback' },
 
-      -- Snippet placeholder navigation lives here instead (the pair LuaSnip's
-      -- own docs use).
+      -- Same navigation on the pair LuaSnip's own docs use.
       ['<C-l>'] = { 'snippet_forward', 'fallback' },
       ['<C-j>'] = { 'snippet_backward', 'fallback' },
 
@@ -1143,7 +1326,7 @@ do
   vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
 
   -- Ensure basic parsers are installed
-  local parsers = { 'bash', 'c', 'cpp', 'glsl', 'cmake', 'make', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'json', 'yaml', 'rust', 'java', 'python', 'javascript', 'typescript', 'c_sharp' }
+  local parsers = { 'bash', 'c', 'cpp', 'glsl', 'cmake', 'make', 'diff', 'html', 'lua', 'luadoc', 'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc', 'json', 'yaml', 'rust', 'java', 'python', 'javascript', 'typescript', 'c_sharp', 'gdscript', 'gdshader', 'godot_resource', 'r', 'rnoweb' }
   require('nvim-treesitter').install(parsers)
 
   ---@param buf integer
